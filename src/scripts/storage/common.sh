@@ -57,6 +57,17 @@ guard_path() {
         return 1
     fi
 
+    # Normalize trailing separators and reject lexical aliases that could
+    # bypass the case-arm ordering below (review fix, 33ec1b96).
+    path="${path%/}"   # /mnt/storage/  -> /mnt/storage
+    path="${path%/}"   # /mnt/storage// -> /mnt/storage (second trailing)
+    case "$path" in
+        */./*)          echo "[$(get_ts)] [ERR!] [guard_path] $label contains dot segment: $path" >> "$DEBUG_LOG"; return 1 ;;
+        */../*|*/..)   echo "[$(get_ts)] [ERR!] [guard_path] $label contains dot-dot segment: $path" >> "$DEBUG_LOG"; return 1 ;;
+        *//*) echo "[$(get_ts)] [ERR!] [guard_path] $label contains repeated separators: $path" >> "$DEBUG_LOG"; return 1 ;;
+    esac
+    [ -z "$path" ] && return 1   # was only slashes
+
     # Reject root or near-root paths
     if [ "$path" = "/" ] || [ "$path" = "/tmp" ] || [ "$path" = "/mnt" ] || [ "$path" = "/usr" ]; then
         echo "[$(get_ts)] [ERR!] [guard_path] $label is a system root: $path" >> "$DEBUG_LOG"
@@ -74,13 +85,16 @@ guard_path() {
         /boot/config/plugins/unraid-aicliagents|/boot/config/plugins/unraid-aicliagents/*) allowed=1 ;;
     esac
 
-    # User-configurable persistence paths under /mnt/. Allow any pool except the
-    # mounts that aren't valid persistence roots. Rejecting only the explicit
-    # system mounts means Unraid user-pools (e.g. /mnt/cache, /mnt/cache_nvme,
-    # /mnt/scratch_old, /mnt/zfs_pool, custom names from disks.ini) all work.
-    # S-02 (#1352): /mnt/disks and /mnt/addons are real Unassigned Devices mount
-    # roots (NOT tmpfs — the old comment was wrong); /mnt/addons is the UD-blessed
-    # path for plugin-owned devices. A sub-directory UNDER a mounted UD device is a
+    # User-configurable persistence paths under /mnt/.
+    # Bare pool roots (/mnt/cache, /mnt/storage, /mnt/zfs_pool, custom names
+    # from disks.ini) are first-class targets: StorageTargetService offers them
+    # at candidate rank 2, and /mnt/user at rank 6. The four deny arms below
+    # match BEFORE the /mnt/* catch-all, and `case` short-circuits on first
+    # match, so /mnt/disks, /mnt/addons, /mnt/remotes, /mnt/rootshare stay
+    # refused even though /mnt/* would match them.
+    # S-02 (#1352): /mnt/disks and /mnt/addons are real Unassigned Devices
+    # mount roots; /mnt/addons is the UD-blessed path for plugin-owned
+    # devices. A sub-directory UNDER a mounted UD device is a
     # valid persist target; the device mount point itself (/mnt/disks/<label>) and
     # the bare roots are not — only a sub-path is useful, and requiring one avoids
     # accepting the mount-point parents as target roots. /mnt/remotes (network
@@ -95,6 +109,9 @@ guard_path() {
             /mnt/rootshare|/mnt/rootshare/*) : ;; # Unraid root export — not a user data path
             /mnt/*/*)                       allowed=1 ;;  # any pool: /mnt/<name>/<sub>
             /mnt/disk[0-9]*)                allowed=1 ;;  # array disks: /mnt/disk1, /mnt/disk2, ...
+            # Bare pool root (/mnt/<pool>) and /mnt/user — first-class picker
+            # targets. Deny arms above win (case short-circuits on first match).
+            /mnt/*)                         allowed=1 ;;  # bare pool root or /mnt/user
         esac
     fi
 
@@ -539,6 +556,12 @@ home_mount_in_use() {
             return 0
         fi
     done
+    # No overlay at <mnt> -> there are no overlay holders to find. Without this,
+    # `fuser -m` on an unmounted path resolves to the CONTAINING filesystem
+    # (rootfs) and reports every process on the box as a holder, wedging
+    # maintenance permanently. The ttyd scan above already ran and is
+    # authoritative, so a live session still reports busy even with no mount.
+    _overlay_present_at "$mnt" || return 1
     # Open fd / cwd / exe / mmap holders, EXCLUDING the plugin's own infra
     # daemons (keyring.json lives in the upper dir; a lower-only consolidation
     # remount keeps their fds valid). If a non-infra holder remains -> busy.

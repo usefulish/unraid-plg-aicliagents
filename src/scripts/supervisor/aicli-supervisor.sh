@@ -1929,6 +1929,8 @@ _supervisor_overlay_busy() {
         return 1
     fi
     # Fast path: any open fd / cwd / exe / mmap physically on the fs.
+    # Same rootfs-scope trap as home_mount_in_use — see common.sh.
+    mountpoint -q "$mnt" 2>/dev/null || return 1
     fuser -sm "$mnt" 2>/dev/null && return 0
     # Live interactive session: a ttyd whose argv carries AICLI_HOME=<mount>.
     local _pid
