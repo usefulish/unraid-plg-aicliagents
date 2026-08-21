@@ -57,16 +57,18 @@ guard_path() {
         return 1
     fi
 
-    # Normalize trailing separators and reject lexical aliases that could
-    # bypass the case-arm ordering below (review fix, 33ec1b96).
-    path="${path%/}"   # /mnt/storage/  -> /mnt/storage
-    path="${path%/}"   # /mnt/storage// -> /mnt/storage (second trailing)
+    # Normalize harmless trailing separators, but reject ambiguous or traversing
+    # path forms before matching the allowlist. This guard protects destructive
+    # operations, so lexical aliases for /mnt or / must never pass as pool names.
+    while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
+        path="${path%/}"
+    done
     case "$path" in
-        */./*)          echo "[$(get_ts)] [ERR!] [guard_path] $label contains dot segment: $path" >> "$DEBUG_LOG"; return 1 ;;
-        */../*|*/..)   echo "[$(get_ts)] [ERR!] [guard_path] $label contains dot-dot segment: $path" >> "$DEBUG_LOG"; return 1 ;;
-        *//*) echo "[$(get_ts)] [ERR!] [guard_path] $label contains repeated separators: $path" >> "$DEBUG_LOG"; return 1 ;;
+        *//*|.|..|*/.|*/..|*/./*|*/../*)
+            echo "[$(get_ts)] [ERR!] [guard_path] $label is non-canonical: $path" >> "$DEBUG_LOG"
+            return 1
+            ;;
     esac
-    [ -z "$path" ] && return 1   # was only slashes
 
     # Reject root or near-root paths
     if [ "$path" = "/" ] || [ "$path" = "/tmp" ] || [ "$path" = "/mnt" ] || [ "$path" = "/usr" ]; then

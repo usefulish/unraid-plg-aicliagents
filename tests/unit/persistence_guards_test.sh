@@ -94,11 +94,13 @@ echo "=== C-1b: path normalization bypass (review fix 33ec1b96) ==="
 # Trailing slashes normalized to accepted form
 assert_rc 0 "/mnt/storage/ (trailing slash)"              guard_path "/mnt/storage/" "PERSIST_PATH"
 assert_rc 0 "/mnt/storage// (double trailing)"            guard_path "/mnt/storage//" "PERSIST_PATH"
+assert_rc 0 "/mnt/storage/// (arbitrary trailing)"         guard_path "/mnt/storage///" "PERSIST_PATH"
 
 # Traversal/alias attacks — must reject
 assert_rc 1 "/mnt/storage/../remotes (dot-dot)"           guard_path "/mnt/storage/../remotes" "PERSIST_PATH"
 assert_rc 1 "/mnt/storage/.. (trailing dot-dot)"          guard_path "/mnt/storage/.." "PERSIST_PATH"
 assert_rc 1 "/mnt/storage/./test (dot segment)"           guard_path "/mnt/storage/./test" "PERSIST_PATH"
+assert_rc 1 "/mnt/storage/. (trailing dot)"                guard_path "/mnt/storage/." "PERSIST_PATH"
 assert_rc 1 "/mnt//storage (repeated sep)"                guard_path "/mnt//storage" "PERSIST_PATH"
 assert_rc 1 "/mnt/disks/../storage (deny-zone escape)"    guard_path "/mnt/disks/../storage" "PERSIST_PATH"
 assert_rc 1 "/mnt/remotes/../../mnt/storage (deep)"       guard_path "/mnt/remotes/../../mnt/storage" "PERSIST_PATH"
@@ -179,6 +181,46 @@ fixture_mounts "proc /proc proc rw 0 0"
 assert_rc 1 "no overlay line -> false"                    _overlay_present_at "$MNT"
 fixture_mounts "overlay ${MNT}extra overlay rw 0 0"
 assert_rc 1 "overlay at different mount -> false"         _overlay_present_at "$MNT"
+
+# ============================================================
+echo ""
+echo "=== D-supervisor: standalone busy fallback ==="
+# ============================================================
+
+SUPERVISOR_SH="$REPO_ROOT/src/scripts/supervisor/aicli-supervisor.sh"
+eval "$(sed -n '/^_supervisor_overlay_busy()/,/^}/p' "$SUPERVISOR_SH")"
+unset -f home_mount_in_use
+
+cat > "$TDIR/pgrep" <<'STUBEOF'
+#!/bin/sh
+: > "$PGREP_MARKER"
+exit 1
+STUBEOF
+cat > "$TDIR/mountpoint" <<'STUBEOF'
+#!/bin/sh
+[ "${TEST_IS_MOUNTED:-0}" = "1" ]
+STUBEOF
+cat > "$TDIR/fuser" <<'STUBEOF'
+#!/bin/sh
+: > "$FUSER_MARKER"
+exit "${TEST_FUSER_RC:-1}"
+STUBEOF
+chmod +x "$TDIR/pgrep" "$TDIR/mountpoint" "$TDIR/fuser"
+export PATH="$TDIR:$PATH"
+export PGREP_MARKER="$TDIR/pgrep-called"
+export FUSER_MARKER="$TDIR/fuser-called"
+
+supervisor_unmounted_probe_order() {
+    rm -f "$PGREP_MARKER" "$FUSER_MARKER"
+    TEST_IS_MOUNTED=0 TEST_FUSER_RC=0 _supervisor_overlay_busy "$MNT"
+    local rc=$?
+    [ "$rc" -eq 1 ] && [ -e "$PGREP_MARKER" ] && [ ! -e "$FUSER_MARKER" ]
+}
+assert_rc 0 "unmounted -> ttyd scan runs, fuser skipped" supervisor_unmounted_probe_order
+
+TEST_IS_MOUNTED=1 TEST_FUSER_RC=0 assert_rc 0 "mounted + fuser holders -> busy" _supervisor_overlay_busy "$MNT"
+TEST_IS_MOUNTED=1 TEST_FUSER_RC=1 assert_rc 1 "mounted + no holders -> idle" _supervisor_overlay_busy "$MNT"
+TEST_IS_MOUNTED=1 TEST_FUSER_RC=2 assert_rc 0 "mounted + fuser error -> busy" _supervisor_overlay_busy "$MNT"
 
 # ============================================================
 echo ""

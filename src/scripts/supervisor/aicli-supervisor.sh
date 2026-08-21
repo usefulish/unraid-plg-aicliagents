@@ -1928,18 +1928,27 @@ _supervisor_overlay_busy() {
         home_mount_in_use "$mnt" && return 0
         return 1
     fi
-    # Fast path: any open fd / cwd / exe / mmap physically on the fs.
-    # Same rootfs-scope trap as home_mount_in_use — see common.sh.
-    mountpoint -q "$mnt" 2>/dev/null || return 1
-    fuser -sm "$mnt" 2>/dev/null && return 0
     # Live interactive session: a ttyd whose argv carries AICLI_HOME=<mount>.
+    # This is authoritative even when the overlay itself is not mounted.
     local _pid
     for _pid in $(pgrep -x ttyd 2>/dev/null); do
         if tr '\0' '\n' < "/proc/$_pid/cmdline" 2>/dev/null | grep -qxF "AICLI_HOME=$mnt"; then
             return 0
         fi
     done
-    return 1
+    # Fast path: any open fd / cwd / exe / mmap physically on the fs. Only run
+    # filesystem-wide fuser for a real mount; on an ordinary rootfs directory it
+    # would report unrelated rootfs holders. Missing probes/errors fail safe.
+    command -v mountpoint >/dev/null 2>&1 || return 0
+    mountpoint -q "$mnt" 2>/dev/null || return 1
+    command -v fuser >/dev/null 2>&1 || return 0
+    fuser -sm "$mnt" 2>/dev/null
+    local _fuser_rc=$?
+    case "$_fuser_rc" in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 # Compatibility name retained for focused unit tests and older sourced callers.
